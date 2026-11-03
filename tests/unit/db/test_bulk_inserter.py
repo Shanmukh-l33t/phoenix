@@ -761,8 +761,8 @@ async def test_embedding_span_from_otlp_gets_a_cost_row(
     async with db() as session:
         cost = await session.scalar(select(models.SpanCost))
     assert cost is not None
-    assert (cost.prompt_tokens, cost.completion_tokens, cost.total_tokens) == (2, None, 2)
-    assert cost.completion_cost is None
+    assert (cost.input_tokens, cost.output_tokens, cost.total_tokens) == (2, None, 2)
+    assert cost.output_cost is None
     if model_name == "text-embedding-3-small":
         assert cost.model_id == rows["EMBEDDING"].id
         assert cost.total_cost == pytest.approx(2 * 2e-8)

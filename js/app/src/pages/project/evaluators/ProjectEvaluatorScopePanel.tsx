@@ -97,6 +97,7 @@ export const ProjectEvaluatorScopePanel = ({
   const [, startWindowTransition] = useTransition();
   // A target or filter change swaps the records wholesale, so the bench shows
   // its loading state under the new title: the switch of level is the point.
+  // The filter field applies its condition in a transition, hence the key.
   // A window change keeps the same records in view while the next page loads,
   // so it is a transition.
   const { filterCondition } = scope;
@@ -127,6 +128,7 @@ export const ProjectEvaluatorScopePanel = ({
   return (
     <div css={panelCSS}>
       <Suspense
+        key={filterCondition}
         fallback={<ProjectEvaluatorTestBenchFallback {...headerProps} />}
       >
         {codeEvaluatorId || inlineCode || decision ? (

@@ -8,8 +8,8 @@ work units a replica runs at once; a shared database semaphore bounds
 database-phase concurrency. Each unit is hydrated with its project evaluator's
 current configuration, evaluated with lease heartbeats, then annotated and
 completed in one transaction — or failed with a cooldown. Shutdown stops
-claiming, gives in-flight units a grace period, then cancels stragglers before
-sandbox teardown.
+claiming, releases in-flight claims to PENDING before draining, then cancels
+stragglers before sandbox teardown.
 """
 
 from __future__ import annotations
@@ -62,7 +62,11 @@ MAX_DB_CONCURRENCY = 5
 """How many consumer database phases (claim, hydrate, publish, evaluator trace) a replica
 runs at once, across its consumers."""
 ERROR_COOLDOWN_SECONDS = 60.0
-DRAIN_TIMEOUT_SECONDS = 10.0
+DRAIN_TIMEOUT_SECONDS = 2.0
+"""How long shutdown gives in-flight evaluations to finish before cancelling
+them. Kept well inside the 10 s Docker's default ``docker stop`` allows before
+SIGKILL; in-flight claims are released at shutdown start regardless, so a stop
+that cuts the drain short still leaves no claim behind to lapse (#17597)."""
 EXECUTION_DEADLINE_SECONDS = 600.0
 
 _TRANSITION_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
@@ -150,6 +154,8 @@ class EvaluationConsumer(DaemonTask):
         self._evaluator_semaphore = evaluator_semaphore or asyncio.Semaphore(claim_batch_size)
         self._db_semaphore = db_semaphore
         self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._in_flight_units: dict[asyncio.Task[None], ClaimedWorkUnit] = {}
+        self._released_at_shutdown: set[int] = set()
         self._publish_metrics = get_env_enable_prometheus()
 
     async def _run(self) -> None:
@@ -187,6 +193,20 @@ class EvaluationConsumer(DaemonTask):
 
     async def stop(self) -> None:
         await super().stop()
+        # Release in-flight claims before draining (#17597): a container stop
+        # budget (Docker's default is 10 s) routinely kills Phoenix before a
+        # drain can finish, and a claim left behind as RUNNING is reclaimed only
+        # after its 90 s lease lapses, costing each unit an attempt it never
+        # spent. Releasing first puts every in-flight unit back to PENDING
+        # within milliseconds of shutdown starting, whatever the stop budget
+        # is; a unit that finishes during the drain then finds its claim gone
+        # at publication and is simply re-run later.
+        units = [unit for task, unit in self._in_flight_units.items() if not task.done()]
+        if units:
+            released = await asyncio.gather(*(self._release_claim(unit) for unit in units))
+            self._released_at_shutdown.update(
+                unit.work_unit_id for unit, ok in zip(units, released) if ok
+            )
         if self._pending_tasks:
             _, pending = await asyncio.wait(set(self._pending_tasks), timeout=DRAIN_TIMEOUT_SECONDS)
             for task in pending:
@@ -224,6 +244,7 @@ class EvaluationConsumer(DaemonTask):
                 task = asyncio.create_task(self._process_unit(unit, configuration))
                 permits -= 1
                 self._pending_tasks.add(task)
+                self._in_flight_units[task] = unit
                 task.add_done_callback(self._unit_finished)
             # A shared hydration failure releases its claims; back off rather than
             # re-claim the same units at once.
@@ -248,6 +269,7 @@ class EvaluationConsumer(DaemonTask):
 
     def _unit_finished(self, task: asyncio.Task[None]) -> None:
         self._pending_tasks.discard(task)
+        self._in_flight_units.pop(task, None)
         self._evaluator_semaphore.release()
         if not task.cancelled() and (exc := task.exception()) is not None:
             logger.error("Online-eval work unit task failed", exc_info=exc)
@@ -272,9 +294,13 @@ class EvaluationConsumer(DaemonTask):
             await self._release_claim(unit)
             raise
 
-    async def _release_claim(self, unit: ClaimedWorkUnit) -> None:
+    async def _release_claim(self, unit: ClaimedWorkUnit) -> bool:
         """Return a claim to PENDING without counting an attempt, shielded so the
-        release survives the cancellation that prompted it."""
+        release survives the cancellation that prompted it. Returns whether the
+        row was still ours to release; a claim already returned to PENDING by
+        shutdown is left alone."""
+        if unit.work_unit_id in self._released_at_shutdown:
+            return True
         try:
             released = await asyncio.shield(
                 self._run_db(
@@ -294,6 +320,8 @@ class EvaluationConsumer(DaemonTask):
                 f"Failed to release cancelled online-eval work unit {unit.work_unit_id}; "
                 "leaving the row for lease-lapse reclaim"
             )
+            return False
+        return released
 
     async def _heartbeat(self, unit: ClaimedWorkUnit) -> bool:
         """Renew a lease outside the shared db semaphore: queueing liveness behind

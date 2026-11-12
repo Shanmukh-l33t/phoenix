@@ -3,6 +3,9 @@ services:
     build:
       dockerfile: ./Dockerfile
       context: .
+    # Docker's default 10 s stop timeout is too short for graceful shutdown;
+    # 30 s matches the grace period the shutdown path is sized for (#17597).
+    stop_grace_period: 30s
     depends_on:
       - db
     ports:

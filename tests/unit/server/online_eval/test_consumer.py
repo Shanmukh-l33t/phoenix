@@ -3564,6 +3564,80 @@ async def test_stop_cancels_and_awaits_work_past_drain_timeout(
     assert cancellation_finished.is_set()
 
 
+async def test_stop_releases_claims_before_a_short_stop_budget_expires(
+    db: DbSessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop budget shorter than the drain must still release in-flight claims.
+
+    ``docker stop`` gives Phoenix 10 s before SIGKILL and the graceful shutdown
+    routinely outlasts it, so the release that follows the drain never runs: the
+    claim stays RUNNING until its lease lapses 90 s later, and the reclaim counts
+    an attempt the unit never spent (#17597).
+    """
+    async with db() as session:
+        project = await _add_project(session)
+        trace = await _add_trace(session, project)
+        span = await _add_span(session, trace)
+    evaluator_id, project_evaluator_id = await _seed_builtin_criteria(db, project.id)
+    unit_id, _ = await _queue_unit(db, span.id, evaluator_id, project_evaluator_id)
+    consumer = EvaluationConsumer(db, decrypt=lambda value: value)
+    started = asyncio.Event()
+
+    async def _hydrate(_: Any) -> list[Any]:
+        return [_hydrated_stub(results=[], evaluator_kind="BUILTIN", output_configs=[])]
+
+    async def _never_resolves(*_: Any, **__: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(consumer._executor, "hydrate_configuration_snapshots", _hydrate)
+    monkeypatch.setattr(consumer._executor, "evaluate_and_annotate", _never_resolves)
+    await consumer._cycle()
+    await started.wait()
+    assert (await _get_unit(db, unit_id)).status == "RUNNING"
+
+    stop_task = asyncio.create_task(consumer.stop())
+    await asyncio.sleep(0.5)  # the container's stop budget: shorter than the drain
+    stop_task.cancel()  # the runtime kills the process before shutdown finishes
+    await asyncio.gather(stop_task, return_exceptions=True)
+
+    row = await _get_unit(db, unit_id)
+    assert row.status == "PENDING"
+    assert row.attempts == 0
+    assert row.claimed_by is None
+    assert row.claimed_at is None
+
+    for task in list(consumer._pending_tasks):
+        task.cancel()
+    await asyncio.gather(*consumer._pending_tasks, return_exceptions=True)
+
+
+async def test_stop_leaves_completed_work_units_done(
+    db: DbSessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shutdown must not disturb claims of work that already finished (#17597)."""
+    async with db() as session:
+        project = await _add_project(session)
+        trace = await _add_trace(session, project)
+        span = await _add_span(
+            session,
+            trace,
+            attributes={"input": {"value": "hi"}, "output": {"value": "there"}},
+        )
+    evaluator_id, project_evaluator_id = await _seed_llm_criteria(db, project.id)
+    unit_id, _ = await _queue_unit(db, span.id, evaluator_id, project_evaluator_id)
+    _patch_playground_client(monkeypatch, _StubLLMClient())
+    consumer = EvaluationConsumer(db, decrypt=lambda value: value)
+    await _cycle_to_completion(consumer)
+    assert (await _get_unit(db, unit_id)).status == "DONE"
+
+    await consumer.stop()
+
+    row = await _get_unit(db, unit_id)
+    assert row.status == "DONE"
+    assert row.attempts == 0
+
+
 async def test_disabled_criteria_drops_unit_without_failing_it(db: DbSessionFactory) -> None:
     async with db() as session:
         project = await _add_project(session)

@@ -3238,6 +3238,70 @@ class TestApplyChatTemplate:
         assert "Invalid JSONPath expression" in response.errors[0].message
         assert "name" in response.errors[0].message
 
+    async def test_apply_template_reports_a_half_typed_path_the_way_the_ui_saw_it(
+        self,
+        gql_client: AsyncGraphQLClient,
+    ) -> None:
+        """
+        Characterization of the error in issue #17883: the prompt preview sends
+        every keystroke of a typed mapping path, so a half-typed `input.tools.`
+        for key `tools` reaches this query and is rejected here. The client
+        keeps such a path back until it parses; this pins the server contract
+        and the exact message that produced the report.
+        """
+        query = """
+          query (
+            $template: PromptChatTemplateInput!,
+            $templateOptions: PromptTemplateOptions!,
+            $inputMapping: EvaluatorInputMappingInput
+          ) {
+            applyChatTemplate(
+              template: $template
+              templateOptions: $templateOptions
+              inputMapping: $inputMapping
+            ) {
+              messages {
+                role
+                content {
+                  ... on TextContentPart {
+                    text {
+                      text
+                    }
+                  }
+                }
+              }
+            }
+          }
+        """
+
+        variables = {
+            "template": {
+                "messages": [
+                    {
+                        "role": "USER",
+                        "content": [{"text": {"text": "Tools: {{ tools }}"}}],
+                    },
+                ]
+            },
+            "templateOptions": {
+                "format": "MUSTACHE",
+                "variables": {},
+            },
+            "inputMapping": {
+                "literalMapping": {},
+                "pathMapping": {"tools": "input.tools."},
+            },
+        }
+
+        response = await gql_client.execute(query=query, variables=variables)
+        assert response.errors is not None
+        assert len(response.errors) == 1
+        assert (
+            response.errors[0].message
+            == "Invalid JSONPath expression for key 'tools': Invalid JSONPath "
+            "syntax: Parse error near the end of string!"
+        )
+
     async def test_apply_template_with_missing_required_variable_returns_error(
         self,
         gql_client: AsyncGraphQLClient,

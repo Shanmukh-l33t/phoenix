@@ -16,6 +16,7 @@ import type {
   PromptChatTemplateInput,
   PromptTemplateFormat,
 } from "@phoenix/components/evaluators/__generated__/EvaluatorPromptPreviewQuery.graphql";
+import { parseEvaluatorPath } from "@phoenix/components/evaluators/evaluatorJsonPath";
 import { ErrorBoundary } from "@phoenix/components/exception";
 import type { ErrorBoundaryFallbackProps } from "@phoenix/components/exception/types";
 import { useEvaluatorStore } from "@phoenix/contexts/EvaluatorContext";
@@ -32,6 +33,7 @@ import type {
   ChatMessage,
   PlaygroundChatTemplate,
 } from "@phoenix/store/playground/types";
+import type { EvaluatorInputMapping } from "@phoenix/types";
 import { safelyStringifyJSON } from "@phoenix/utils/jsonUtils";
 
 /**
@@ -153,6 +155,27 @@ function EvaluatorPromptPreviewErrorFallback(
   );
 }
 
+/**
+ * The mapping the preview query can be handed right now. A path still being
+ * typed is not yet one the server would accept — every keystroke of, say,
+ * `input.tools` passes through `input.tools.`, which the server rejects with
+ * "Invalid JSONPath expression …" and fails the whole preview over — so a path
+ * that does not parse is held back until it does, the way the path field holds
+ * back its own verdict until the field is left.
+ */
+export function toPreviewInputMapping(
+  inputMapping: EvaluatorInputMapping
+): EvaluatorInputMapping {
+  return {
+    literalMapping: inputMapping.literalMapping,
+    pathMapping: Object.fromEntries(
+      Object.entries(inputMapping.pathMapping).filter(
+        ([, path]) => parseEvaluatorPath(path).isValid
+      )
+    ),
+  };
+}
+
 export function EvaluatorPromptPreview() {
   const instance = usePlaygroundContext((state) => state.instances[0]);
   const allInstanceMessages = usePlaygroundContext(
@@ -189,8 +212,35 @@ export function EvaluatorPromptPreview() {
 
   const messageCount = gqlTemplate.messages.length;
 
+  const { inputMapping, evaluatorMappingSource } = useEvaluatorStore(
+    useShallow((state) => ({
+      inputMapping: state.evaluator.inputMapping,
+      evaluatorMappingSource: state.evaluatorMappingSource.source,
+    }))
+  );
+  const previewInputMapping = useMemo(
+    () => toPreviewInputMapping(inputMapping),
+    [inputMapping]
+  );
+  // Everything the query reads, so a change to any of it clears a caught
+  // error and the preview retries: whatever failed while a mapping was being
+  // typed must not hold the preview down once the mapping is complete.
+  const resetKey = useMemo(
+    () =>
+      JSON.stringify([
+        gqlTemplate,
+        templateFormat,
+        previewInputMapping,
+        evaluatorMappingSource ?? {},
+      ]),
+    [gqlTemplate, templateFormat, previewInputMapping, evaluatorMappingSource]
+  );
+
   return (
-    <ErrorBoundary fallback={EvaluatorPromptPreviewErrorFallback}>
+    <ErrorBoundary
+      fallback={EvaluatorPromptPreviewErrorFallback}
+      resetKey={resetKey}
+    >
       <Suspense
         fallback={
           <EvaluatorPromptPreviewSkeleton messageCount={messageCount} />
@@ -199,6 +249,8 @@ export function EvaluatorPromptPreview() {
         <EvaluatorPromptPreviewContent
           gqlTemplate={gqlTemplate}
           templateFormat={templateFormat}
+          inputMapping={previewInputMapping}
+          variables={evaluatorMappingSource ?? {}}
         />
       </Suspense>
     </ErrorBoundary>
@@ -208,18 +260,14 @@ export function EvaluatorPromptPreview() {
 type EvaluatorPromptPreviewContentProps = {
   gqlTemplate: PromptChatTemplateInput;
   templateFormat: PromptTemplateFormat;
+  inputMapping: EvaluatorInputMapping;
+  variables: Record<string, unknown>;
 };
 
 function EvaluatorPromptPreviewContent(
   props: EvaluatorPromptPreviewContentProps
 ) {
-  const { gqlTemplate, templateFormat } = props;
-  const { inputMapping, evaluatorMappingSource } = useEvaluatorStore(
-    useShallow((state) => ({
-      inputMapping: state.evaluator.inputMapping,
-      evaluatorMappingSource: state.evaluatorMappingSource.source,
-    }))
-  );
+  const { gqlTemplate, templateFormat, inputMapping, variables } = props;
   const data = useLazyLoadQuery<EvaluatorPromptPreviewQuery>(
     graphql`
       query EvaluatorPromptPreviewQuery(
@@ -249,7 +297,7 @@ function EvaluatorPromptPreviewContent(
     {
       template: gqlTemplate,
       templateOptions: {
-        variables: evaluatorMappingSource ?? {},
+        variables,
         format: templateFormat,
       },
       inputMapping,

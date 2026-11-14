@@ -190,6 +190,21 @@ describe("the evaluator inputs", () => {
     );
   });
 
+  it("marks a resolved variable quietly, so what fails is what stands out", async () => {
+    await renderInputsView({
+      variables: ["input"],
+      context: getSampleSpanEvaluationContext().context,
+      recordKind: "span",
+      inputMapping: { pathMapping: { input: "input" }, literalMapping: {} },
+      requiredVariables: ["input"],
+    });
+
+    const status = itemFor("input")?.querySelector(".inputs-view__status");
+    expect(status?.textContent).toContain("Resolved");
+    // Resolving is the normal state, so it is not painted as a success.
+    expect(status?.getAttribute("data-color")).toBe("default");
+  });
+
   it("flags a path the server rejects, unless its field is being typed in", async () => {
     await renderInputsView({
       variables: ["input", "output", "metadata", "citations"],

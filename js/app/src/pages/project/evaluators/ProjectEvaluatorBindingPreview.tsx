@@ -257,10 +257,12 @@ function getBindingStatus(
       color: "warning",
     };
   }
+  // Resolving is the normal case, so it reads in the neutral text color: the
+  // eye belongs on the rows that fail, not on every row that binds.
   return {
     label: "Resolved",
     icon: <Icons.CheckmarkCircle />,
-    color: "success",
+    color: "default",
   };
 }
 

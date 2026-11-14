@@ -324,6 +324,85 @@ function MatchedTraceCountLine({
 /** Rows arrive in pages of this many; the first page fits the table without scrolling. */
 const RECORD_PAGE_SIZE = 10;
 
+/**
+ * The rows a "load more" leaves listed: the ones already shown, then the rows
+ * the wider listing adds below them. The listing is the newest `first` records
+ * of a window that keeps filling, so a wider read carries records that arrived
+ * since the last one above the rows it was asked to extend. Taken as it comes,
+ * those land on top of the list the reader was working through and push the
+ * oldest rows off the end, which is the opposite of appending a page.
+ */
+export function appendLoadedRows(
+  shown: readonly RecordedRunRow[],
+  page: readonly RecordedRunRow[]
+): RecordedRunRow[] {
+  const shownKeys = new Set(shown.map(({ key }) => key));
+  const lastShownKey = shown.at(-1)?.key;
+  const lastShownAt =
+    lastShownKey == null
+      ? -1
+      : page.findIndex(({ key }) => key === lastShownKey);
+  const added =
+    lastShownAt < 0
+      ? page.filter(({ key }) => !shownKeys.has(key))
+      : page.slice(lastShownAt + 1);
+  return [...shown, ...added];
+}
+
+/** Whether two listings hold the same records in the same order. */
+function listsSameRecords(
+  left: readonly RecordedRunRow[],
+  right: readonly RecordedRunRow[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((row, index) => row.key === right[index]?.key)
+  );
+}
+
+type ListedRows = {
+  /** What the rows were listed for; a new window or filter lists other records. */
+  source: string;
+  /** How many rows the listing was asked for when these were taken. */
+  limit: number;
+  rows: RecordedRunRow[];
+};
+
+/**
+ * The rows a record source lists. Up to one page they are the query's rows, so
+ * records arriving at the top show up there. Past it the reader is paging back
+ * through what is already listed: each wider page is appended below those rows,
+ * and a re-read of the same page leaves them where they are, because moving the
+ * rows the reader was working through is the thing "load more" must not do.
+ */
+function useListedRows(
+  page: RecordedRunRow[],
+  { source, limit }: { source: string; limit: number }
+): RecordedRunRow[] {
+  const [listed, setListed] = useState<ListedRows>({
+    source,
+    limit,
+    rows: page,
+  });
+  // A new window, filter or scope lists other records entirely.
+  if (listed.source !== source) {
+    setListed({ source, limit, rows: page });
+    return page;
+  }
+  if (limit <= RECORD_PAGE_SIZE) {
+    if (!listsSameRecords(listed.rows, page)) {
+      setListed({ source, limit, rows: page });
+    }
+    return page;
+  }
+  if (listed.limit < limit) {
+    const rows = appendLoadedRows(listed.rows, page);
+    setListed({ source, limit, rows });
+    return rows;
+  }
+  return listed.rows;
+}
+
 /** No search params to carry over: the bench's own URL has nothing the viewer should inherit. */
 const NO_SEARCH_PARAMS = new URLSearchParams();
 
@@ -429,10 +508,14 @@ function TraceRecordSource({
           },
         ]
       : [];
+  const listedRows = useListedRows(rows, {
+    source: `${projectId}|${filterCondition.trim()}|${benchProps.timeWindow.startIso}`,
+    limit,
+  });
   return (
     <ProjectEvaluatorTestBench
       {...benchProps}
-      rows={rows}
+      rows={listedRows}
       recordKind="trace"
       hasMore={data.project?.rootSpans?.pageInfo.hasNextPage ?? false}
       isLoadingMore={isShowingMore}
@@ -544,10 +627,14 @@ function SessionRecordSource({
           },
         ]
       : [];
+  const listedRows = useListedRows(rows, {
+    source: `${projectId}|${filterCondition.trim()}|${benchProps.timeWindow.startIso}`,
+    limit,
+  });
   return (
     <ProjectEvaluatorTestBench
       {...benchProps}
-      rows={rows}
+      rows={listedRows}
       recordKind="session"
       hasMore={data.project?.sessions?.pageInfo.hasNextPage ?? false}
       isLoadingMore={isShowingMore}
@@ -646,10 +733,14 @@ function SpanRecordSource({
           },
         ]
       : [];
+  const listedRows = useListedRows(rows, {
+    source: `${projectId}|${filterCondition.trim()}|${benchProps.timeWindow.startIso}`,
+    limit,
+  });
   return (
     <ProjectEvaluatorTestBench
       {...benchProps}
-      rows={rows}
+      rows={listedRows}
       recordKind="span"
       hasMore={data.project?.spans?.pageInfo.hasNextPage ?? false}
       isLoadingMore={isShowingMore}

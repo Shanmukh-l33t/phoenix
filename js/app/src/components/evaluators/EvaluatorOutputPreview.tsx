@@ -28,6 +28,10 @@ import type {
   InlineLLMEvaluatorInput,
 } from "@phoenix/components/evaluators/__generated__/EvaluatorOutputPreviewMutation.graphql";
 import {
+  describeRenderedMessageLimit,
+  parseRenderedMessageLimit,
+} from "@phoenix/components/evaluators/renderedMessageLimit";
+import {
   createLLMEvaluatorPayload,
   getOutputConfigOptimizationValue,
 } from "@phoenix/components/evaluators/utils";
@@ -285,7 +289,7 @@ export const EvaluatorOutputPreview = () => {
                     variant="danger"
                     title={`Evaluator Error: ${result.evaluatorName}`}
                   >
-                    {result.message}
+                    <EvaluatorErrorMessage message={result.message} />
                   </Alert>
                 )}
               </Flex>
@@ -299,7 +303,7 @@ export const EvaluatorOutputPreview = () => {
               dismissable
               onDismissClick={() => setError(null)}
             >
-              {error}
+              <EvaluatorErrorMessage message={error} />
             </Alert>
           )}
         </Flex>
@@ -334,6 +338,25 @@ export const EvaluatorOutputPreview = () => {
     </>
   );
 };
+
+/**
+ * Renders an evaluation error, expanding the terminal
+ * `RENDERED_MESSAGE_TOO_LARGE` state into the size, the limit and what to
+ * change. Every other error renders as-is.
+ */
+function EvaluatorErrorMessage({ message }: { message: string }) {
+  const limit = parseRenderedMessageLimit(message);
+  if (limit == null) {
+    return <>{message}</>;
+  }
+  const { title, description } = describeRenderedMessageLimit(limit);
+  return (
+    <Flex direction="column" gap="size-50">
+      <Text weight="heavy">{title}</Text>
+      <Text>{description}</Text>
+    </Flex>
+  );
+}
 
 function AnnotationPreviewJSONBlock(props: { annotation: Annotation }) {
   const { name, label, score, explanation } = props.annotation;

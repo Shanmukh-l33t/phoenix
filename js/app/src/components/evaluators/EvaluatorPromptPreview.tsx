@@ -8,7 +8,15 @@ import { graphql, useLazyLoadQuery } from "react-relay";
 import invariant from "tiny-invariant";
 import { useShallow } from "zustand/react/shallow";
 
-import { Card, Flex, Icon, Icons, Text, View } from "@phoenix/components";
+import {
+  Alert,
+  Card,
+  Flex,
+  Icon,
+  Icons,
+  Text,
+  View,
+} from "@phoenix/components";
 import { Skeleton } from "@phoenix/components/core/loading/Skeleton";
 import type {
   ContentPartInput,
@@ -16,6 +24,10 @@ import type {
   PromptChatTemplateInput,
   PromptTemplateFormat,
 } from "@phoenix/components/evaluators/__generated__/EvaluatorPromptPreviewQuery.graphql";
+import {
+  getRenderedMessageBytes,
+  getRenderedMessageWarning,
+} from "@phoenix/components/evaluators/renderedMessageLimit";
 import { ErrorBoundary } from "@phoenix/components/exception";
 import type { ErrorBoundaryFallbackProps } from "@phoenix/components/exception/types";
 import { useEvaluatorStore } from "@phoenix/contexts/EvaluatorContext";
@@ -249,8 +261,25 @@ function EvaluatorPromptPreviewContent(
   );
 
   // Display the messages with applied template variables from the query result
+  const renderedTexts = data.prompt.messages.map((message) =>
+    message.content
+      .map((part) => {
+        if (part.__typename === "TextContentPart" && part.text) {
+          return part.text.text;
+        }
+        return "";
+      })
+      .join("")
+  );
+  const warning = getRenderedMessageWarning(
+    getRenderedMessageBytes(renderedTexts)
+  );
+
   return (
     <Flex direction="column" gap="size-200">
+      {warning != null && (
+        <Alert variant={warning.level}>{warning.description}</Alert>
+      )}
       {data.prompt.messages.map((message, index) => {
         // Extract text content from the message
         const textContent = message.content
